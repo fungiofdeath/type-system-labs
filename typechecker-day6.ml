@@ -132,7 +132,7 @@ let rec print_monotype (monotype : monotype) : string =
   | TConstant id -> "" ^ print_id id
   | TGeneric id -> "'" ^ print_id id
   | TVariable { contents = Unknown id } -> "?" ^ print_id id
-  | TVariable { contents = Known monotype } -> "" ^ print_monotype monotype ^""
+  | TVariable { contents = Known monotype } -> "" ^ print_monotype monotype ^ ""
   | TArrow (doms, cod) ->
       let domains = map print_monotype doms |> intersperse in
       let codomain = " -> " ^ print_monotype cod in (
@@ -202,8 +202,10 @@ let rec unify (t1 : monotype) (t2 : monotype) : error_tree option =
   in
   let= _ = log_context ("unify " ^ anded ()) in
   match t1, t2 with
+  | _, _ when t1 == t2 -> None
   | TConstant id1, TConstant id2 when id1 = id2 -> None
   | TConstant _, TConstant _ -> incompatible ()
+  | TVariable r1, TVariable r2 when r1 == r2 -> None
   | TVariable { contents = Known t1 }, _ -> unify t1 t2
   | TVariable ref, _ ->
       let saved = print_monotype t1 in
@@ -371,6 +373,7 @@ let rec reconstruct (exp : exp0) (type_env : type_env) : exp1 * error_tree optio
       let venv = (name, Mono ty_v)::type_env in
       log ("value type env is " ^ print_type_env ~indentation:!log_depth venv);
       let value1, verr = reconstruct value venv in
+      let uerr = unify ty_v (typeof value1) in
       leave_after ();
       log "let abstracting";
       enter ();
@@ -379,7 +382,7 @@ let rec reconstruct (exp : exp0) (type_env : type_env) : exp1 * error_tree optio
       leave_after ();
       let= _ = log_context ("body type env is " ^ print_type_env ~indentation:!log_depth benv) in
       let body1, berr = reconstruct body benv in
-      let errors = verr **<? berr **<? [] in
+      let errors = verr **<? uerr **<? berr **<? [] in
       LetRec1 (typeof body1, name, value1, body1), catch "error while reconstructing let" errors
   | Lambda0 (ps, body) ->
       let= _ =
@@ -443,7 +446,7 @@ let type_env : type_env = [
   (idcdr, tcdr);
 ]
 
-let idmap  = var ~name:(Some "mapcar") ()
+(* let idmap  = var ~name:(Some "mapcar") ()
 let idf    = var ~name:(Some "f") ()
 let idlst  = var ~name:(Some "lst") ()
 let mapcar = Var0 idmap
@@ -466,8 +469,32 @@ let program = LetRec0 (idmap, body,
                       Int0 2;
                       Call0 (cons, [
                         Int0 3;
-                        nil])])])]))
+                        nil])])])])) *)
 
+let idf  = var ~name:(Some "f") ()
+let idg  = var ~name:(Some "g") ()
+let id_1 = var ()
+let id_2 = var ()
+let idx  = var ~name:(Some "x") ()
+let ef  = Var0 idf
+let eg  = Var0 idg
+let e_1 = Var0 id_1
+let e_2 = Var0 id_2
+let ex  = Var0 idx
+
+let program =
+  LetRec0 (
+    idf,
+    Lambda0 ([id_1],
+      Call0 (
+        Lambda0 ([idg], Call0 (eg, [Unit0])),
+        [
+          Lambda0 ([id_2], Int0 1)
+        ])),
+    LetRec0 (
+      idx,
+      Call0 (ef, [Unit0]),
+      ex))
 ;;
 log "-------- start --------";
 ;;
