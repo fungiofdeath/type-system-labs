@@ -118,15 +118,18 @@ let c_list = constructor ~name:(Some "list") ()
 let print_id (TypeId (name, id)) =
   match name with
   | None -> "_" ^ string_of_int id
-  | Some name -> name ^ "_" ^ string_of_int id
+  (* | Some name -> name ^ "_" ^ string_of_int id *)
+  | Some name -> name
 let print_constructor (TypeConstructor (name, id)) =
   match name with
   | None -> "_" ^ string_of_int id
-  | Some name -> name ^ "_" ^ string_of_int id
+  (* | Some name -> name ^ "_" ^ string_of_int id *)
+  | Some name -> name
 let print_variable (VarId (name, id)) =
   match name with
   | None -> "_" ^ string_of_int id
-  | Some name -> name ^ "_" ^ string_of_int id
+  (* | Some name -> name ^ "_" ^ string_of_int id *)
+  | Some name -> name
 let rec print_monotype (monotype : monotype) : string =
   match monotype with
   | TConstant id -> "" ^ print_id id
@@ -143,7 +146,8 @@ let rec print_monotype (monotype : monotype) : string =
       )
   | TApplied (con, xs) ->
       let args = map print_monotype xs |> intersperse in
-      print_constructor con ^ "(" ^ args ^ ")"
+      let name = print_constructor con in
+      if length xs == 1 then args ^ " " ^ name else "(" ^ args ^ ") " ^ name
 let print_polytype (polytype : polytype) : string =
   match polytype with
   | Mono monotype -> print_monotype monotype
@@ -446,7 +450,7 @@ let type_env : type_env = [
   (idcdr, tcdr);
 ]
 
-(* let idmap  = var ~name:(Some "mapcar") ()
+let idmap  = var ~name:(Some "mapcar") ()
 let idf    = var ~name:(Some "f") ()
 let idlst  = var ~name:(Some "lst") ()
 let mapcar = Var0 idmap
@@ -469,9 +473,9 @@ let program = LetRec0 (idmap, body,
                       Int0 2;
                       Call0 (cons, [
                         Int0 3;
-                        nil])])])])) *)
+                        nil])])])]))
 
-let idf  = var ~name:(Some "f") ()
+(* let idf  = var ~name:(Some "f") ()
 let idg  = var ~name:(Some "g") ()
 let id_1 = var ()
 let id_2 = var ()
@@ -494,7 +498,7 @@ let program =
     LetRec0 (
       idx,
       Call0 (ef, [Unit0]),
-      ex))
+      ex)) *)
 ;;
 log "-------- start --------";
 ;;
