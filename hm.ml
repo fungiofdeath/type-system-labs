@@ -429,21 +429,21 @@ module PPrint = struct
       string_of_int n
     in
     match typ with
-    | TCon n -> printf "$t_%s" (type_name n)
-    | TVar n -> printf "'t_%s" (type_name n)
+    | TCon n -> printf "t%s" (type_name n)
+    | TVar n -> printf "T%s" (type_name n)
     | TApp (n, xs) ->
-      if n == Ids.tfun
+      (* if n == Ids.tfun
       then
         let butlast, last = splitlast xs in
         printf "fn(";
         print_list (fun () -> printf ", ") print_type butlast;
         printf ") -> ";
         print_type last
-      else (
-        printf "%s(" (type_name n);
+      else ( *)
+        printf "t%s(" (type_name n);
         print_list (fun () -> printf ", ") print_type xs;
         printf ")"
-      )
+      (* ) *)
     | Poly (binds, mono) ->
       printf "for {";
       print_list (fun () -> printf ", ") print_int (Types.Set.to_list binds);
@@ -461,10 +461,10 @@ module PPrint = struct
     | Var n -> print_var_name nenv n
     | Call (f, args) ->
       printf "@[<hv>@[";
-      print_exp nenv f;
-      printf "@]@ @[<hv>@[";
+      print_careful f;
+      printf "@]@ @[";
       print_list (fun () -> printf "@]@ @[") print_careful args;
-      printf "@]@]@]"
+      printf "@]@]"
 
     | If (c, y, n) ->
       printf "@[<hv>@[if@;<1 2>@[";
@@ -480,7 +480,7 @@ module PPrint = struct
       print_var_name nenv name;
       printf "@ :=@;<1 2>@[";
       print_exp nenv init_value;
-      printf "@,in@;<1 2>@[";
+      printf "@]@;in@;<1 2>@[";
       print_exp nenv body;
       printf "@]"
 
@@ -510,14 +510,15 @@ module Constraints = struct
   let print_constraint (Eq (s,t)) =
     PPrint.print_type s;
     Format.printf " = ";
-    PPrint.print_type t
+    PPrint.print_type t;
+    Format.printf ","
 
   let rec print_failure failure =
     match failure with
     | Single (reason, constraint_) ->
-      Format.printf "@[";
+      Format.printf "@[<v>";
       print_constraint constraint_;
-      Format.printf ":@;%s@]" reason
+      Format.printf ":@;%s@]@;" reason
     | Nested failures ->
       failures |>
       List.iter
@@ -550,15 +551,21 @@ module Constraints = struct
   let caught_exception w e = Constrain ([], Some (w, CaughtException e))
 
   let rec constrain w t1 t2 =
-    (*Format.printf "comparing ";
+    Format.printf "comparing ";
     PPrint.print_type t1;
     Format.printf " and ";
     PPrint.print_type t2;
-    Format.print_newline ();*)
+    Format.print_newline ();
     let eq = Eq (t1, t2) in
     let eqr = Eq (t2, t1) in
     let hide c = Show.Show (fun () -> print_constraint c) in
     try match t1, t2 with
+    | Poly (_, ma), Poly (_, mb) ->
+      [constrain (hide eq) ma mb] |> combine_all |> guard w
+    | Poly (set, mono), x when Types.Set.is_empty set ->
+      [constrain (hide eq) mono x] |> combine_all |> guard w
+    | Poly _, _ -> fail w "polytypes and monotypes do not match" eq
+    | _, Poly (set, mono) -> constrain w t2 t1
     | TVar n, _ -> success eq
     | _, TVar m -> success eqr
     | TCon n, TCon m when n = m -> success eq
@@ -571,8 +578,6 @@ module Constraints = struct
       |> combine_all
       |> guard w
     | TApp _, TApp _ -> fail w "Mismatched heads or args" eq
-    | Poly _, Poly _ -> raise (Lazy "do we need polytype constraints?")
-    | _, _ -> fail w "Mismatched sort" eq
     with e -> caught_exception w e
 end
 
@@ -592,7 +597,7 @@ module Solver = struct
 
   let rec collect_constraints (tenv : tenv) (exp : expression):
       expression * typ * expression Constraints.effect =
-    (*Format.print_newline ();
+    Format.print_newline ();
     Format.printf "@[<2>collect_constraints tenv=[@[<b 0>";
     PPrint.print_list
       (fun () -> Format.printf "@ ")
@@ -601,8 +606,8 @@ module Solver = struct
         PPrint.print_type typ)
       (Map.to_list (Context.env tenv));
     Format.printf "@]]@ expr = @[";
-    PPrint.print_exp (PPrint.basic_nenv ()) exp;
-    Format.printf "@]@]\n";*)
+    PPrint.print_exp (PPrint.create ()) exp;
+    Format.printf "@]@]\n";
     let open Constraints in
     let annot exp typ eff = Annot (typ, exp), typ, eff in
     let pos_of tenv exp =
@@ -639,9 +644,10 @@ module Solver = struct
       annot (If (annot_c, annot_y, annot_n)) y_type finalfx
     | Let (name, init_value, body) ->
       let tvar = gentvar () in
-      let tenv_inner = Context.add name tvar tenv in
-      let annot_v, v_type, vfx = let_abstract tenv_inner init_value in
-      let annot_b, b_type, bfx = collect_constraints tenv_inner body in
+      let tenv_value = Context.add name tvar tenv in
+      let annot_v, v_type, vfx = collect_constraints tenv_value init_value in
+      let tenv_body = Context.add name (abstract tenv_value v_type) tenv in
+      let annot_b, b_type, bfx = collect_constraints tenv_body body in
       combine_all [vfx; bfx; constrain pos tvar v_type]
       |> guard pos
       |> annot (Let (name, annot_v, annot_b)) b_type
@@ -660,12 +666,6 @@ module Solver = struct
       |> guard pos
       in
       Annot (desired, annot_body), desired, finalfx
-  and let_abstract (tenv : Context.t) exp =
-    match collect_constraints tenv exp with
-    | Annot (_, inner), typ, fx ->
-      let abstracted = abstract tenv typ in
-      Annot (abstracted, inner), abstracted, fx
-    | _ -> raise (Invariant "All types from collect_constraints must be annotated")
   and literal_type _tenv obj =
     match obj with
     | OUnit     -> TCon (Ids.tunit)
@@ -679,7 +679,29 @@ end
 print_endline "================     Loading program      ==================";
 ;;
 
-let tvar id = TVar id
+let nfoo = 30000
+let nf   = 30001
+let nx   = 30002
+let np   = 30003
+let efoo = Var nfoo
+let ef   = Var nf
+let ex   = Var nx
+let ep   = Var np
+let bfunc =
+  Func ([np],
+    Call (
+      Func ([nf], Call (ef, [Literal OUnit])),
+      [
+        Func ([np], Literal (OInt 1));
+      ]
+    )
+  )
+let bprogram =
+  Let (nfoo, bfunc,
+    Let (nx, Call (efoo, [Literal OUnit]),
+      ex))
+
+(* let tvar id = TVar id
 let econs = Var Ids.ncons
 let ecar  = Var Ids.ncar
 let ecdr  = Var Ids.ncdr
@@ -733,7 +755,7 @@ let bprogram =
     Call (econs, [Literal (OInt 1);
      Call (econs, [Literal (OInt 2);
       Call (econs, [Literal (OInt 3);
-       enil])])])]))
+       enil])])])])) *)
 ;;
 print_endline "Finished.";
 print_endline "================ Solving type constraints ==================";
