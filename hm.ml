@@ -3,13 +3,6 @@ exception Lazy of string      (* too lazy to handle *)
 exception Invariant of string (* some invariant violated *)
 let todo _ = raise Todo
 
-open Format
-let rec print_list sep f list =
-  match list with
-  | [] -> ()
-  | x::[] -> f x
-  | x::xs -> f x; sep (); print_list sep f xs
-
 exception Too_short
 let splitlast xs =
   let q = Queue.create () in
@@ -115,6 +108,11 @@ module Helper = struct
   end
 end
 
+module Show = struct
+  type t = Show of (unit -> unit)
+  let show (Show f) = f ()
+end
+
 type typname = int
 module TypnameHelper = Helper.Make(
   struct
@@ -122,15 +120,6 @@ module TypnameHelper = Helper.Make(
     let compare x y = x - y
   end
 )
-
-module Ids = struct
-  let eid     = 0
-  let tunit   = 1
-  let tbool   = 2
-  let tstring = 3
-  let tint    = 4
-  let tfun    = 5
-end
 
 type typ =
   | TCon of typname
@@ -176,37 +165,6 @@ module Types = struct
   open List
   module Set = TypnameHelper.Set
   module Map = TypnameHelper.Map
-
-  let rec print_type typ =
-    let type_name n =
-      if n == Ids.tunit   then "unit" else
-      if n == Ids.tint    then "int"  else
-      if n == Ids.tbool   then "bool" else
-      if n == Ids.tstring then "string" else
-      if n == Ids.tfun    then "fn" else
-      string_of_int n
-    in
-    match typ with
-    | TCon n -> printf "$t_%s" (type_name n)
-    | TVar n -> printf "'t_%s" (type_name n)
-    | TApp (n, xs) ->
-      if n == Ids.tfun
-      then
-        let butlast, last = splitlast xs in
-        printf "fn(";
-        print_list (fun () -> printf ", ") print_type butlast;
-        printf ") -> ";
-        print_type last
-      else (
-        printf "%s(" (type_name n);
-        print_list (fun () -> printf ", ") print_type xs;
-        printf ")"
-      )
-    | Poly (binds, mono) ->
-      printf "for {";
-      print_list (fun () -> printf ", ") print_int (Set.to_list binds);
-      printf "}. ";
-      print_type mono
 
   let combine_children combine f typ =
     match typ with
@@ -293,81 +251,286 @@ module Exprs = struct
       union value_frees body_frees
     | _ -> combine_children combine free_vars expr
 
-  let rec print_exp exp =
-    let print_name name = printf "x_%d" name in
+end
+
+module Context = struct
+  type t = Ctx of {
+    var_names  : string Exprs.Map.t;
+    typ_names : string Types.Map.t;
+    env : typ Exprs.Map.t;
+  }
+
+  let env (Ctx { env }) = env
+  let update (Ctx { var_names; typ_names }) new_env =
+    Ctx { env = new_env; var_names; typ_names }
+  let add name typ ctx = env ctx |> Exprs.Map.add name typ |> update ctx
+  let add_all binds ctx = Exprs.Map.add_all (env ctx) binds |> update ctx
+  let find_opt name ctx = env ctx |> Exprs.Map.find_opt name
+  let find_or  name default ctx = env ctx |> Exprs.Map.find_or name default
+
+  module Constants = struct
+    let error   = 0
+    let ga      = 1
+    let gb      = 2
+
+    let tunit   = 100
+    let tbool   = 101
+    let tstring = 102
+    let tint    = 103
+    let tfun    = 104
+    let tlist   = 105
+
+    let nsucc   = 200
+    let nplus   = 201
+    let nminus  = 202
+    let ntimes  = 203
+    let ndiv    = 204
+    let nequal  = 205
+
+    let nnull   = 300
+    let ncons   = 301
+    let ncar    = 302
+    let ncdr    = 303
+    let nnil    = 305
+
+    let nslen   = 400
+    let nsplus  = 401
+    let nsnth   = 402
+
+    let tsucc   = TApp (tfun, [TVar tint; TVar tint])
+    let tplus   = TApp (tfun, [TVar tint; TVar tint])
+    let tminus  = TApp (tfun, [TVar tint; TVar tint])
+    let ttimes  = TApp (tfun, [TVar tint; TVar tint])
+    let tdiv    = TApp (tfun, [TVar tint; TVar tint])
+    let tequal  = TApp (tfun, [TVar tint; TVar tbool])
+
+    let tnull   = Poly (Types.Set.of_list [ga], TApp (tfun, [TApp (tlist, [TVar ga]); TVar tbool]))
+    let tnil    = Poly (Types.Set.of_list [ga], TApp (tlist, [TVar ga]))
+    let tcons   = Poly (Types.Set.of_list [ga], TApp (tfun, [TVar ga; TApp (tlist, [TVar ga]); TApp (tlist, [TVar ga])]))
+    let tcar    = Poly (Types.Set.of_list [ga], TApp (tfun, [TApp (tlist, [TVar ga]); TVar ga]))
+    let tcdr    = Poly (Types.Set.of_list [ga], TApp (tfun, [TApp (tlist, [TVar ga]); TVar ga]))
+
+    let tslen   = TApp (tfun, [TVar tstring; TVar tbool])
+    let tsplus  = TApp (tfun, [TVar tstring; TVar tstring; TVar tstring])
+    let tsnth   = TApp (tfun, [TVar tstring; TVar tint; TVar tint])
+  end
+
+  let create () =
+    let open Constants in
+    Ctx {
+      var_names = Exprs.Map.of_list [
+        (nsucc,   "succ");
+        (nplus,   "plus");
+        (nminus,  "minus");
+        (ntimes,  "times");
+        (ndiv,    "div");
+        (nequal,  "equal");
+        (nnull,   "null");
+        (ncons,   "cons");
+        (ncar,    "car");
+        (ncdr,    "cdr");
+        (nnil,    "nil");
+        (nslen,   "slen");
+        (nsplus,  "splus");
+        (nsnth,   "snth");
+      ];
+      typ_names = Types.Map.of_list [
+        (tunit,   "unit");
+        (tint,    "int");
+        (tbool,   "bool");
+        (tstring, "string");
+        (tfun,    "fn");
+        (tlist,   "list");
+      ];
+      env = Exprs.Map.of_list [
+        (nsucc,   tsucc);
+        (nplus,   tplus);
+        (nminus,  tminus);
+        (ntimes,  ttimes);
+        (ndiv,    tdiv);
+        (nequal,  tequal);
+        (nnull,   tnull);
+        (ncons,   tcons);
+        (ncar,    tcar);
+        (ncdr,    tcdr);
+        (nnil,    tnil);
+        (nslen,   tslen);
+        (nsplus,  tsplus);
+        (nsnth,   tsnth);
+      ];
+    }
+end
+
+module Ids = Context.Constants
+
+module PPrint = struct
+  open Format
+
+  let rec print_list sep f list =
+    match list with
+    | [] -> ()
+    | x::[] -> f x
+    | x::xs -> f x; sep (); print_list sep f xs
+
+  type name_env = Names of {
+    mutable already_unknown_vars  : Exprs.Set.t;
+    mutable already_unknown_types : Types.Set.t;
+    mutable known_vars    : string Exprs.Map.t;
+    mutable known_types   : string Types.Map.t;
+    mutable tapp_printers : ((typ -> unit) -> typ list -> unit) Types.Map.t
+  }
+
+  let of_ctx ctx = 
+    let Context.Ctx { var_names; typ_names; } = ctx in
+    Names {
+      already_unknown_vars  = Exprs.Set.empty;
+      already_unknown_types = Types.Set.empty;
+      known_vars  = var_names;
+      known_types = typ_names;
+      tapp_printers = Types.Map.of_list [
+        (Ids.tfun, fun print_type typs ->
+                    let butlast, last = splitlast typs in
+                    printf "fn(";
+                    print_list (fun () -> printf ", ") print_type butlast;
+                    printf ") -> ";
+                    print_type last);
+      ];
+    }
+  
+  let create () = of_ctx (Context.create ())
+
+  let print_var_name (Names nenv) name =
+    if Exprs.Set.mem name (nenv.already_unknown_vars)
+    then printf "x_%d" name
+    else
+      match Exprs.Map.find_opt name nenv.known_vars with
+      | Some name -> printf "%s" name
+      | None -> (
+          nenv.already_unknown_vars <-
+            Exprs.Set.add name nenv.already_unknown_vars;
+          printf "x_%d" name
+      )
+
+  let print_obj lit =
+    match lit with
+    | OUnit -> printf "()"
+    | OInt n -> printf "%d" n
+    | OBool b -> printf "%b" b
+    | OString s -> printf "%s" s
+    | OFunc _ -> printf "<closure>"
+
+  let rec print_type typ =
+    let type_name n =
+      if n == Ids.tunit   then "unit" else
+      if n == Ids.tint    then "int"  else
+      if n == Ids.tbool   then "bool" else
+      if n == Ids.tstring then "string" else
+      if n == Ids.tfun    then "fn" else
+      string_of_int n
+    in
+    match typ with
+    | TCon n -> printf "$t_%s" (type_name n)
+    | TVar n -> printf "'t_%s" (type_name n)
+    | TApp (n, xs) ->
+      if n == Ids.tfun
+      then
+        let butlast, last = splitlast xs in
+        printf "fn(";
+        print_list (fun () -> printf ", ") print_type butlast;
+        printf ") -> ";
+        print_type last
+      else (
+        printf "%s(" (type_name n);
+        print_list (fun () -> printf ", ") print_type xs;
+        printf ")"
+      )
+    | Poly (binds, mono) ->
+      printf "for {";
+      print_list (fun () -> printf ", ") print_int (Types.Set.to_list binds);
+      printf "}. ";
+      print_type mono
+
+  let rec print_exp nenv exp =
     let print_careful exp =
       match exp with
-      | Literal _ | Var _ -> print_exp exp
-      | _ -> printf "(@["; print_exp exp; printf "@])"
-    in
-    let print_obj lit =
-      match lit with
-      | OUnit -> printf "()"
-      | OInt n -> printf "%d" n
-      | OBool b -> printf "%b" b
-      | OString s -> printf "%s" s
-      | OFunc _ -> printf "<closure>"
+      | Literal _ | Var _ -> print_exp nenv exp
+      | _ -> printf "(@["; print_exp nenv exp; printf "@])"
     in
     match exp with
     | Literal l -> print_obj l
-    | Var n -> print_name n
+    | Var n -> print_var_name nenv n
     | Call (f, args) ->
       printf "@[<hv>@[";
-      print_exp f;
-      printf "@]@ @[";
+      print_exp nenv f;
+      printf "@]@ @[<hv>@[";
       print_list (fun () -> printf "@]@ @[") print_careful args;
-      printf "@]@]"
+      printf "@]@]@]"
 
     | If (c, y, n) ->
       printf "@[<hv>@[if@;<1 2>@[";
-      print_exp c;
+      print_exp nenv c;
       printf "@]@]@ @[then@;<1 2>@[";
-      print_exp y;
+      print_exp nenv y;
       printf "@]@]@ @[else@;<1 2>@[";
-      print_exp n;
+      print_exp nenv n;
       printf "@]@]@]"
 
     | Let (name, init_value, body) ->
       printf "let@ ";
-      print_name name;
+      print_var_name nenv name;
       printf "@ :=@;<1 2>@[";
-      print_exp init_value;
+      print_exp nenv init_value;
       printf "@,in@;<1 2>@[";
-      print_exp body;
+      print_exp nenv body;
       printf "@]"
 
     | Func (params, body) ->
       printf "@[<hv>@[\\@[";
-      print_list (fun () -> printf "@ ") print_name params;
+      print_list (fun () -> printf "@ ") (print_var_name nenv) params;
       printf "@]@]@;<1 0>=>@]@;<1 2>@[<hov>";
-      print_exp body;
+      print_exp nenv body;
       printf "@]"
 
     | Annot (typ, e) ->
       printf "[⟨@[";
-      Types.print_type typ;
+      print_type typ;
       printf "@]⟩@;<1 1>@[";
-      print_exp e;
+      print_exp nenv e;
       printf "@]]"
 end
 
 module Constraints = struct
   type t = Eq of typ * typ
-  type fail_obj = ..
-  type fail_obj += ConstraintPos of t
   type failure =
-    | Single : t -> failure
-    | Nested : (fail_obj * failure) list -> failure
+    | Single : string * t -> failure
+    | Nested : (Show.t * failure) list -> failure
     | CaughtException : exn -> failure
-  type 'where effect = Constrain of t list * (fail_obj * failure) option
+  type 'where effect = Constrain of t list * (Show.t * failure) option
 
   let print_constraint (Eq (s,t)) =
-    Types.print_type s;
-    printf " = ";
-    Types.print_type t
+    PPrint.print_type s;
+    Format.printf " = ";
+    PPrint.print_type t
+
+  let rec print_failure failure =
+    match failure with
+    | Single (reason, constraint_) ->
+      Format.printf "@[";
+      print_constraint constraint_;
+      Format.printf ":@;%s@]" reason
+    | Nested failures ->
+      failures |>
+      List.iter
+        (fun (showable, failure) ->
+          Format.printf "@[<v>at @[";
+          Show.show showable;
+          Format.printf "@]@;|";
+          print_failure failure;
+          Format.printf "@]")
+    | CaughtException _ -> Format.printf "caught exception"
 
   let empty = Constrain ([], None)
-  let empty_state : t list * (fail_obj * failure) list = ([], [])
+  let empty_state : t list * (Show.t * failure) list = ([], [])
   let reducer state result =
     let (successes, failures) = state in
     let Constrain (new_successes, failure_opt) = result in
@@ -380,70 +543,77 @@ module Constraints = struct
     else Constrain (successes, None)
   let combine_all list = List.fold_left reducer empty_state list
 
-  let fail  w f =
-    printf "!! constraint failure !!\n";
-    Constrain ([],  Some (w, Single f))
+  let fail where why f =
+    print_endline "!! constraint failure !!";
+    Constrain ([],  Some (where, Single (why, f)))
   let success t = Constrain ([t], None)
   let caught_exception w e = Constrain ([], Some (w, CaughtException e))
 
   let rec constrain w t1 t2 =
-    printf "comparing ";
-    Types.print_type t1;
-    printf " and ";
-    Types.print_type t2;
-    printf "\n";
+    (*Format.printf "comparing ";
+    PPrint.print_type t1;
+    Format.printf " and ";
+    PPrint.print_type t2;
+    Format.print_newline ();*)
     let eq = Eq (t1, t2) in
     let eqr = Eq (t2, t1) in
+    let hide c = Show.Show (fun () -> print_constraint c) in
     try match t1, t2 with
     | TVar n, _ -> success eq
     | _, TVar m -> success eqr
     | TCon n, TCon m when n = m -> success eq
-    | TCon n, TCon m -> fail w eq
-    | TCon _, _ -> fail w eq
-    | _, TCon _ -> fail w eqr
+    | TCon n, TCon m -> fail w "Types do not match" eq
+    | TCon _, _ -> fail w "ctypes cannot be xtypes" eq
+    | _, TCon _ -> fail w "ctypes cannot be xtypes" eqr
     | TApp (n, xs), TApp (m, ys) when n = m && List.(length xs = length ys) ->
          List.combine xs ys
-      |> List.map (fun (x, y) -> constrain (ConstraintPos (Eq (x, y))) x y)
+      |> List.map (fun (x, y) -> constrain (hide eq) x y)
       |> combine_all
       |> guard w
-    | TApp _, TApp _ -> fail w eq
+    | TApp _, TApp _ -> fail w "Mismatched heads or args" eq
     | Poly _, Poly _ -> raise (Lazy "do we need polytype constraints?")
-    | _, _ -> fail w eq
+    | _, _ -> fail w "Mismatched sort" eq
     with e -> caught_exception w e
 end
 
-module TypeSystem = struct
+module Solver = struct
   open List
   module Map = Exprs.Map
-  type tenv = typ Map.t
+  type tenv = Context.t
 
   let map_tenv_types f tenv = Map.map_values_to_list f tenv
 
   let abstract tenv typ =
-    let open Types.Set in
-    let bound_vars = combine_all (map_tenv_types Types.free_vars tenv) in
-    Poly (diff (Types.free_vars typ) bound_vars, typ)
+    let tenv_frees = Context.env tenv |> Map.map_values_to_list Types.free_vars in
+    let bound_vars = Types.Set.combine_all tenv_frees in
+    Poly (Types.Set.diff (Types.free_vars typ) bound_vars, typ)
 
-  type Constraints.fail_obj += ExprPos of expression
   exception Name_not_found of varname
+
   let rec collect_constraints (tenv : tenv) (exp : expression):
       expression * typ * expression Constraints.effect =
-    print_newline ();
-    printf "@[<2>collect_constraints tenv=[@[<b 0>";
-    print_list
-      (fun () -> printf "@ ")
-      (fun (n, typ) -> printf "%d: " n; Types.print_type typ)
-      (Map.to_list tenv);
-    printf "@]]@ expr = @[";
-    Exprs.print_exp exp;
-    printf "@]@]\n";
+    (*Format.print_newline ();
+    Format.printf "@[<2>collect_constraints tenv=[@[<b 0>";
+    PPrint.print_list
+      (fun () -> Format.printf "@ ")
+      (fun (n, typ) ->
+        Format.printf "%d: " n;
+        PPrint.print_type typ)
+      (Map.to_list (Context.env tenv));
+    Format.printf "@]]@ expr = @[";
+    PPrint.print_exp (PPrint.basic_nenv ()) exp;
+    Format.printf "@]@]\n";*)
     let open Constraints in
     let annot exp typ eff = Annot (typ, exp), typ, eff in
+    let pos_of tenv exp =
+      Show.Show (fun () -> PPrint.(print_exp (of_ctx tenv) exp))
+    in
+    let pos = pos_of tenv exp in
     match exp with
     | Literal l ->
       annot exp (literal_type tenv l) empty
     | Var n ->
-      (match Map.find_opt n tenv with
+      (match Context.find_opt n tenv with
       | None -> raise (Name_not_found n)
       | Some found -> annot exp (Types.instantiate found) empty)
     | Call (f, args) ->
@@ -453,30 +623,31 @@ module TypeSystem = struct
         List.map (collect_constraints tenv) args |> split3
       in
       let finalfx =
-        constrain (ExprPos exp) f_type (TApp (Ids.tfun, arg_types @ [tvar]))
+        constrain pos f_type (TApp (Ids.tfun, arg_types @ [tvar]))
            :: ffx :: afx
         |> combine_all
-        |> guard (ExprPos exp)
+        |> guard pos
       in annot (Call (annot_f, annot_args)) tvar finalfx
     | If (c, y, n) ->
       let annot_c, c_type, cfx = collect_constraints tenv c in
       let annot_y, y_type, yfx = collect_constraints tenv y in
       let annot_n, n_type, nfx = collect_constraints tenv n in
       let finalfx = 
-        combine_all [constrain (ExprPos exp) y_type n_type; cfx; yfx; nfx]
-        |> guard (ExprPos exp)
+        combine_all [constrain pos y_type n_type; cfx; yfx; nfx]
+        |> guard pos
       in
       annot (If (annot_c, annot_y, annot_n)) y_type finalfx
     | Let (name, init_value, body) ->
       let tvar = gentvar () in
-      let tenv_inner = Map.add name tvar tenv in
+      let tenv_inner = Context.add name tvar tenv in
       let annot_v, v_type, vfx = let_abstract tenv_inner init_value in
       let annot_b, b_type, bfx = collect_constraints tenv_inner body in
-      guard (ExprPos exp) (combine_all [vfx; bfx; constrain (ExprPos exp) tvar v_type])
+      combine_all [vfx; bfx; constrain pos tvar v_type]
+      |> guard pos
       |> annot (Let (name, annot_v, annot_b)) b_type
     | Func (params, body) ->
       let new_binds, domains = zipmap (fun _ -> gentvar ()) params in
-      let tenv_body = Map.add_all tenv new_binds in
+      let tenv_body = Context.add_all new_binds tenv in
       let annot_body, body_type, bodyfx = collect_constraints tenv_body body in
       annot
         (Func (params, annot_body))
@@ -485,11 +656,11 @@ module TypeSystem = struct
     | Annot (desired, body) ->
       let annot_body, body_type, bodyfx = collect_constraints tenv body in
       let finalfx =
-         combine_all [constrain (ExprPos exp) desired body_type; bodyfx]
-      |> guard (ExprPos exp)
+         combine_all [constrain pos desired body_type; bodyfx]
+      |> guard pos
       in
       Annot (desired, annot_body), desired, finalfx
-  and let_abstract tenv exp =
+  and let_abstract (tenv : Context.t) exp =
     match collect_constraints tenv exp with
     | Annot (_, inner), typ, fx ->
       let abstracted = abstract tenv typ in
@@ -504,34 +675,17 @@ module TypeSystem = struct
     | OFunc _   -> raise Todo
 end
 
-let poly generics mono = Poly (Types.Set.of_list generics, mono)
-let func domains ret = TApp (Ids.tfun, domains @ [ret])
+;;
+print_endline "================     Loading program      ==================";
+;;
+
 let tvar id = TVar id
-let tint = TCon Ids.tint
-let tbool = TCon Ids.tbool
-let tlist typ = TApp (20, [typ])
-let tcons = tlist (tvar 20001) |> func [tvar 20001; tlist (tvar 20001)]  |> poly [20001]
-let tcar  = func [tlist (tvar 20003)] (tvar 20003) |> poly [20003]
-let tcdr  = func [tlist (tvar 20004)] (tvar 20004) |> poly [20004]
-let tsucc = func [tint] tint
-let tnull = func [tlist (tvar 20005)] tbool |> poly [20005]
-let tnil  = tlist (tvar 20006) |> poly [20006]
-let ncons = 30001
-let ncar  = 30002
-let ncdr  = 30003
-let nsucc = 30004
-let nnull = 30005
-let nnil  = 30006
-let econs = Var ncons
-let ecar  = Var ncar
-let ecdr  = Var ncdr
-let esucc = Var nsucc
-let enull = Var nnull
-let enil  = Var nnil
-let tenv  =
-     [(ncons, tcons); (ncar, tcar); (ncdr, tcdr); (nsucc, tsucc);
-      (nnull, tnull); (nnil, tnil)]
-  |> Exprs.Map.of_list
+let econs = Var Ids.ncons
+let ecar  = Var Ids.ncar
+let ecdr  = Var Ids.ncdr
+let esucc = Var Ids.nsucc
+let enull = Var Ids.nnull
+let enil  = Var Ids.nnil
 
 let nf    = 30101
 let nlist = 30102
@@ -580,27 +734,43 @@ let bprogram =
      Call (econs, [Literal (OInt 2);
       Call (econs, [Literal (OInt 3);
        enil])])])]))
-let btyped, btype, (Constraints.Constrain (bconstraints, bfailure))
-  = TypeSystem.collect_constraints tenv bprogram
+;;
+print_endline "Finished.";
+print_endline "================ Solving type constraints ==================";
+Format.set_margin 80
+;;
 
+let btyped, btype, (Constraints.Constrain (bconstraints, bfailure))
+  = Solver.collect_constraints (Context.create ()) bprogram
 ;; 
-printf "Constraints: \n";
-print_list (fun () -> printf "\n") Constraints.print_constraint bconstraints;
-print_newline ();
+print_endline "Finished.";
+(match bfailure with
+| None -> ()
+| Some (showable, failure) ->
+  Format.printf "Failed at @[";
+  Show.show showable;
+  Format.printf "@]:";
+  Format.print_newline ();
+  Constraints.print_failure failure;
+  Format.print_newline ();
+);
+print_endline "================    Found Constraints     ==================";
+PPrint.print_list
+  (fun _ -> Format.print_newline ())
+  Constraints.print_constraint bconstraints;
+Format.print_newline ();
 ;;
-set_margin 80
 ;;
-print_flush ();
-printf "Input program:@;<1 2>@[";
-Exprs.print_exp bprogram;
-printf "@]";
-print_newline ();
+Format.printf "Input program:@;<1 2>@[";
+PPrint.print_exp (PPrint.create ()) bprogram;
+Format.printf "@]";
+Format.print_newline ();
 ;;
-print_flush ();
-printf "Resulting program:@;<1 2>@[";
-Exprs.print_exp btyped;
-printf "@]";
-print_newline ();
+Format.printf "Resulting program:@;<1 2>@[";
+PPrint.print_exp (PPrint.create ()) btyped;
+Format.printf "@]";
+Format.print_newline ();
+
 (*
 
 1000 = (int -> int) -> int -> int
