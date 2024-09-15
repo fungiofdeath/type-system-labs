@@ -40,30 +40,61 @@ module TNameSet = Set.Make(
 (******************************************************************************)
 (* Logging, formatting, and debug *)
 
-let basic_fmt_vname (VN (name, id)) = name ^ "_" ^ string_of_int id
-let basic_fmt_cname (CN name) = name
-let basic_fmt_tname (TN (name_opt, id)) =
-  match name_opt with
-  | Some s -> s ^ "_" ^ string_of_int id
-  | None   ->     "_" ^ string_of_int id
-let rec basic_fmt_t (t : t) : string =
+let latin = "abcdefghijklmnopqrstuvwxyz"
+let greek = "αꞵγδεζηθκμξπστχψ" (* ambiguous ones removed *)
+
+type namectx = NCtx of ((int * string) list * int) ref
+let fmt_tname ?ctx:ctx ?(is_generic = false) (TN (name_opt, id)) : string =
+  if Option.is_none ctx then
+    let id = string_of_int id in
+    match name_opt with
+    | Some name -> name ^ "_" ^ id
+    | None      ->        "_" ^ id
+  else
+    let NCtx ctx = Option.get ctx in
+    let table, alloc = !ctx in
+    match assoc_opt id table with
+    | Some already_formatted -> already_formatted
+    | None ->
+        match name_opt with
+        | Some name ->
+            let formatted = name ^ "_" ^ string_of_int id in
+            ctx := (id, formatted)::table, alloc;
+            formatted
+        | None ->
+            let alphabet  = if is_generic then greek else latin in
+            let length    = String.length alphabet in
+            let letteridx = alloc mod length in
+            let suffixidx = alloc / length in
+            let suffix    = if suffixidx = 0 then "" else string_of_int suffixidx in
+            let formatted = String.make 1 alphabet.[letteridx] ^ suffix in
+            ctx := (id, formatted)::table, alloc + 1;
+            formatted
+let fmt_vname (VN (name, id)) = name ^ "_" ^ string_of_int id
+let fmt_cname (CN name) = name
+
+let rec fmt_t ?ctx:namectx (t : t) : string =
   let open String in
+  let ctx = Option.value namectx ~default:(NCtx (ref ([], 0))) in
+  let fmt_t = fmt_t ~ctx:ctx in
+  let fmt_generic = fmt_tname ~ctx:ctx ~is_generic:true in
+  let fmt_tname = fmt_tname ~ctx:ctx ~is_generic:false in
   match t with
   | TUnit -> "unit"
   | TInt  -> "int"
-  | TVariable { contents = Unknown name  } -> "'" ^ basic_fmt_tname name
-  | TVariable { contents = Linked (_, t) } -> "[" ^ basic_fmt_t t ^ "]"
-  | TConstant name -> basic_fmt_tname name
-  | TParam name -> "?" ^ uppercase_ascii (basic_fmt_tname name)
+  | TVariable { contents = Unknown name  } -> "'" ^ fmt_tname name
+  | TVariable { contents = Linked (_, t) } -> "[" ^ fmt_t t ^ "]"
+  | TConstant name -> fmt_tname name
+  | TParam name -> "?" ^ uppercase_ascii (fmt_generic name)
   | TArrow (doms, cod) ->
-      let doms = concat ", " (List.map basic_fmt_t doms) in
-      "(" ^ doms ^ ") -> " ^ basic_fmt_t cod
+      let doms = concat ", " (List.map fmt_t doms) in
+      "(" ^ doms ^ ") -> " ^ fmt_t cod
   | TApplied (x, xs) ->
-      let args = concat ", " (List.map basic_fmt_t xs) in
-      "(" ^ args ^ ") " ^ basic_fmt_cname x
+      let args = concat ", " (List.map fmt_t xs) in
+      "(" ^ args ^ ") " ^ fmt_cname x
   | TUniversal (qs, inner) ->
-      let quantified = concat " " (List.map basic_fmt_tname qs) in
-      "∀" ^ uppercase_ascii quantified ^ ". " ^ basic_fmt_t inner
+      let quantified = concat " " (List.map fmt_generic qs) in
+      "∀" ^ uppercase_ascii quantified ^ ". " ^ fmt_t inner
 
 (******************************************************************************)
 (* Accessors / Setters / Updaters / Predicates / Important utils *)
@@ -86,12 +117,12 @@ let is_linked (tvar : tvar) : bool =
   | Unknown _ -> false
 let link (tvar : tvar ref) (linkto : t) =
   match !tvar with
-  | Linked (name, t) -> failwith (basic_fmt_tname name ^ "is already linked")
+  | Linked (name, t) -> failwith (fmt_tname name ^ "is already linked")
   | Unknown name -> tvar := Linked (name, linkto)
 let of_tvar (tvar : tvar) : t =
   match tvar with
   | Linked (_, t) -> t
-  | Unknown name -> failwith (basic_fmt_tname name ^ " is not linked")
+  | Unknown name -> failwith (fmt_tname name ^ " is not linked")
 
 let concat_tname_sets (sets : TNameSet.t list) : TNameSet.t =
   fold_left TNameSet.union TNameSet.empty sets
@@ -138,9 +169,9 @@ let rec unify (t1 : t) (t2 : t) =
   | _ ->
       failwith (
         "disallowed unification "
-        ^ basic_fmt_t t1
+        ^ fmt_t t1
         ^ " ~ "
-        ^ basic_fmt_t t2
+        ^ fmt_t t2
       )
 
 let rec subst (alist : (tname * t) list) (t : t) : t =
@@ -160,9 +191,9 @@ let rec subst (alist : (tname * t) list) (t : t) : t =
       if Set.cardinal errors != 0 then
         failwith (
           "scope error, cannot subst {"
-          ^  String.concat ", " (map basic_fmt_tname (Set.to_list errors))
+          ^  String.concat ", " (map fmt_tname (Set.to_list errors))
           ^ "} into "
-          ^ basic_fmt_t t
+          ^ fmt_t t
         )
       else TUniversal (qs, subst alist inner)
   | _ -> t
@@ -172,7 +203,7 @@ let apply (universal : t) (args : t list) =
   | TUniversal (qs, inner) -> subst (combine qs args) inner
   | _ ->
       failwith (
-        "tried to apply a non-universal type " ^ basic_fmt_t universal
+        "tried to apply a non-universal type " ^ fmt_t universal
       )
 
 let instantiate (t : t) =
@@ -188,64 +219,3 @@ let abstract (t : t) (ctx : tctx) : t =
   let frees  = TNameSet.(diff fv_t fv_ctx |> to_list) in
   let generics = map (fun fv -> (fv, gentparam ())) frees in
   TUniversal (frees, subst generics t)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-(******************************************************************************)
-(* Proper pretty printing *)
-
-(* counts the number of generated names *)
-(* type tnamectx = TNCtx of ((int * string) list * int) ref
-let greek = "αꞵγδεζηθκμστπχφψ" *)
-
-(* let fmt_tname (TNCtx ref) (TN (name_opt, id)) : string =
-  let seen, count = !ref in
-  match List.assoc_opt id seen with
-  | Some s -> s
-  | None ->
-      match name_opt with
-      | Some name -> (
-          ref := (id, name)::seen, count;
-          name
-        )
-      | None -> (
-          let open String in
-          let letter = (length greek) mod count in
-          let postindex = (length greek) / count in
-          let formatted =
-            if postindex != 0
-            then make 1 greek.[letter] ^ string_of_int postindex
-            else make 1 greek.[letter]
-          in
-          ref := (id, formatted)::seen, count + 1;
-          formatted
-        ) *)
-
-
-
-
-
-
-
-
-
-
-
