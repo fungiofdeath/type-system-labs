@@ -40,8 +40,8 @@ module TNameSet = Set.Make(
 (******************************************************************************)
 (* Logging, formatting, and debug *)
 
-let latin = "abcdefghijklmnopqrstuvwxyz"
-let greek = "αꞵγδεζηθκμξπστχψ" (* ambiguous ones removed *)
+let latin = ["a";"b";"c";"d";"e";"f";"g";"h";"i";"j";"k";"l";"m";"n";"o";"p";"q";"r";"s";"t";"u";"v";"w";"x";"y";"z"]
+let greek = ["α";"ꞵ";"γ";"δ";"ε";"ζ";"η";"θ";"κ";"μ";"ξ";"π";"σ";"τ";"χ";"ψ"] (* ambiguous ones removed *)
 
 type namectx = NCtx of ((int * string) list * int) ref
 let fmt_tname ?ctx:ctx ?(is_generic = false) (TN (name_opt, id)) : string =
@@ -63,11 +63,11 @@ let fmt_tname ?ctx:ctx ?(is_generic = false) (TN (name_opt, id)) : string =
             formatted
         | None ->
             let alphabet  = if is_generic then greek else latin in
-            let length    = String.length alphabet in
+            let length    = length alphabet in
             let letteridx = alloc mod length in
             let suffixidx = alloc / length in
             let suffix    = if suffixidx = 0 then "" else string_of_int suffixidx in
-            let formatted = String.make 1 alphabet.[letteridx] ^ suffix in
+            let formatted = nth alphabet letteridx ^ suffix in
             ctx := (id, formatted)::table, alloc + 1;
             formatted
 let fmt_vname (VN (name, id)) = name ^ "_" ^ string_of_int id
