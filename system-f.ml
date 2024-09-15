@@ -44,7 +44,9 @@ let latin = ["a";"b";"c";"d";"e";"f";"g";"h";"i";"j";"k";"l";"m";"n";"o";"p";"q"
 let greek = ["α";"ꞵ";"γ";"δ";"ε";"ζ";"η";"θ";"κ";"μ";"ξ";"π";"σ";"τ";"χ";"ψ"] (* ambiguous ones removed *)
 
 type namectx = NCtx of ((int * string) list * int) ref
-let fmt_tname ?ctx:ctx ?(is_generic = false) (TN (name_opt, id)) : string =
+let namectx_create () = NCtx (ref ([], 0))
+let ctx_of (opt : namectx option) = Option.value opt ~default:(namectx_create ())
+let fmt_tname ?ctx ?(is_generic = false) (TN (name_opt, id)) : string =
   if Option.is_none ctx then
     let id = string_of_int id in
     match name_opt with
@@ -73,22 +75,39 @@ let fmt_tname ?ctx:ctx ?(is_generic = false) (TN (name_opt, id)) : string =
 let fmt_vname (VN (name, id)) = name ^ "_" ^ string_of_int id
 let fmt_cname (CN name) = name
 
-let rec fmt_t ?ctx:namectx (t : t) : string =
+let print_derefs = true
+let rec fmt_t ?ctx (t : t) : string =
+  let ctx = ctx_of ctx in
+  let fmt_t = fmt_t ~ctx in
+  let fmt_constant = fmt_tname ?ctx:None ~is_generic:false in
+  let fmt_generic = fmt_tname ~ctx ~is_generic:true in
+  let fmt_tname = fmt_tname ~ctx ~is_generic:false in
+  let rec simple_t (t : t) : bool =
+    match t with
+    | TUnit       -> true
+    | TInt        -> true
+    | TConstant _ -> true
+    | TParam _    -> true
+    | TVariable { contents = Unknown _     } -> true
+    | TVariable { contents = Linked (_, t) } -> print_derefs || simple_t t
+    | _ -> false
+  in
   let open String in
-  let ctx = Option.value namectx ~default:(NCtx (ref ([], 0))) in
-  let fmt_t = fmt_t ~ctx:ctx in
-  let fmt_generic = fmt_tname ~ctx:ctx ~is_generic:true in
-  let fmt_tname = fmt_tname ~ctx:ctx ~is_generic:false in
   match t with
   | TUnit -> "unit"
   | TInt  -> "int"
   | TVariable { contents = Unknown name  } -> "'" ^ fmt_tname name
-  | TVariable { contents = Linked (_, t) } -> "[" ^ fmt_t t ^ "]"
-  | TConstant name -> fmt_tname name
+  | TVariable { contents = Linked (_, t) } ->
+      if print_derefs
+      then "[" ^ fmt_t t ^ "]"
+      else       fmt_t t
+  | TConstant name -> fmt_constant name
   | TParam name -> "?" ^ uppercase_ascii (fmt_generic name)
+  | TArrow ([dom], cod) when simple_t dom -> fmt_t dom ^ " -> " ^ fmt_t cod
   | TArrow (doms, cod) ->
       let doms = concat ", " (List.map fmt_t doms) in
       "(" ^ doms ^ ") -> " ^ fmt_t cod
+  | TApplied (c, [x]) when simple_t x -> fmt_t x ^ " " ^ fmt_cname c
   | TApplied (x, xs) ->
       let args = concat ", " (List.map fmt_t xs) in
       "(" ^ args ^ ") " ^ fmt_cname x
@@ -167,11 +186,12 @@ let rec unify (t1 : t) (t2 : t) =
       unify cod1 cod2
   | TApplied (x, xs), TApplied (y, ys) when x = y -> iter2 unify xs ys
   | _ ->
+      let ctx = namectx_create () in
       failwith (
         "disallowed unification "
-        ^ fmt_t t1
+        ^ fmt_t ~ctx t1
         ^ " ~ "
-        ^ fmt_t t2
+        ^ fmt_t ~ctx t2
       )
 
 let rec subst (alist : (tname * t) list) (t : t) : t =
@@ -189,11 +209,12 @@ let rec subst (alist : (tname * t) list) (t : t) : t =
       let setqs = Set.of_list qs in
       let errors = Set.inter keys setqs in
       if Set.cardinal errors != 0 then
+        let ctx = namectx_create () in
         failwith (
           "scope error, cannot subst {"
-          ^  String.concat ", " (map fmt_tname (Set.to_list errors))
+          ^  String.concat ", " (map (fmt_tname ~ctx) (Set.to_list errors))
           ^ "} into "
-          ^ fmt_t t
+          ^ fmt_t ~ctx t
         )
       else TUniversal (qs, subst alist inner)
   | _ -> t
@@ -219,3 +240,13 @@ let abstract (t : t) (ctx : tctx) : t =
   let frees  = TNameSet.(diff fv_t fv_ctx |> to_list) in
   let generics = map (fun fv -> (fv, gentparam ())) frees in
   TUniversal (frees, subst generics t)
+
+;;
+TUniversal ([TN (None, 0); (TN (None, 1))],
+  TArrow(
+    [TArrow ([TParam (TN (None, 0))], TParam (TN (None, 1)));
+     TApplied (CN "list", [TParam (TN (None, 0))])],
+    TApplied (CN "list", [TParam (TN (None, 1))])))
+
+|> fmt_t
+|> print_endline
