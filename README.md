@@ -1,6 +1,24 @@
 
 This is a lab for me to experiment with type systems.
 
+## HM Driven System F
+
+Divided into two parts, the driver and engine:
+- The engine is System F, and includes the important primitives needed to
+  build a type checker
+- The driver is a HM reconstruction algorithm
+
+### Run
+
+Run with `ocaml system-f.ml`. There is no parser so programs have to
+be hard-coded.
+
+### Todo
+
+- Add polymorphic-compatible unification or subtyping, not sure which
+- Add abstraction optimization
+- Add effect logs
+
 ## HM
 
 A Hindley-Damas-Milner style type system.
